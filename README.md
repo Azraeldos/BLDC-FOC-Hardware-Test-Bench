@@ -1,4 +1,4 @@
-# BLDC_FOV
+# BLDC_FOC
 
 STM32 firmware for BLDC motor bring-up and (eventually) FOC on a **NUCLEO-F446RE** with a **SimpleFOC Mini v1.0** (DRV8313) power stage and an **AS5600** magnetic encoder.
 
@@ -72,7 +72,7 @@ Mechanical RPM ≈ `(g_omega / 2π) × 60 / pole_pairs`.
 Core/          CubeMX-generated HAL init (GPIO, I2C1, TIM1)
 UserCode/      Application code (encoder + open-loop drive)
 Drivers/       CMSIS + STM32F4 HAL
-BLDC_FOV.ioc   CubeMX configuration
+BLDC_FOC.ioc   CubeMX configuration
 ```
 
 ## Future implementations
