@@ -151,5 +151,5 @@ BLDC_FOC.ioc       CubeMX configuration
 - [x] TIM ISR control (no `HAL_Delay` in the loop)
 - [x] Persist `g_zero_offset` / `g_pole_pairs` to flash
 - [x] Optional Mini `nFAULT` handling (PC8)
-- [ ] **Current FOC** only if hardware is added (ADC + current sense); Mini v1 / DRV8313 is typically voltage-only
-- [ ] Complementary PWM / dead-time for a 6-PWM stage (not required for Mini)
+- [ ] **Current FOC** only if hardware is added (ADC + current sense); SimpleFOCMiniv1 / DRV8313 is typically voltage-only
+- [ ] Complementary PWM / dead-time for a 6-PWM stage (not required for SimpleFOCMiniv1)
