@@ -18,7 +18,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set the project name
-set(CMAKE_PROJECT_NAME BLDC_FOV)
+set(CMAKE_PROJECT_NAME BLDC_FOC)
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -45,6 +45,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     UserCode/Src/user_main.cpp
+    UserCode/Src/user_params.cpp
+    UserCode/Src/user_flash.cpp
+    UserCode/Src/as5600.cpp
+    UserCode/Src/foc_math.cpp
+    UserCode/Src/motor_pwm.cpp
+    UserCode/Src/control.cpp
 )
 
 # Add include paths

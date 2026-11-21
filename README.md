@@ -1,8 +1,6 @@
 # BLDC_FOC
 
-STM32 firmware for BLDC motor bring-up and (eventually) FOC on a **NUCLEO-F446RE** with a **SimpleFOC Mini v1.0** (DRV8313) power stage and an **AS5600** magnetic encoder.
-
-Right now the project spins the motor **open-loop** and reads the encoder for debugging. Sensor-aligned FOC is not implemented yet.
+STM32 firmware for BLDC motor bring-up and sensor-aligned **voltage FOC** on a **NUCLEO-F446RE** with a **SimpleFOC Mini v1.0** (DRV8313) power stage and an **AS5600** magnetic encoder.
 
 ## Hardware
 
@@ -10,7 +8,7 @@ Right now the project spins the motor **open-loop** and reads the encoder for de
 |-------|------|
 | NUCLEO-F446RE | MCU |
 | SimpleFOC Mini v1.0 (DRV8313) | 3-PWM + EN gate driver |
-| AS5600 | Magnetic angle sensor (I2C) |
+| AS5600 | Magnetic angle sensor (I2C @ 400 kHz) |
 | BLDC motor | 3-phase load |
 
 ### Pin map
@@ -21,21 +19,30 @@ Right now the project spins the motor **open-loop** and reads the encoder for de
 | Phase V PWM | PA9 (TIM1_CH2) | IN2 |
 | Phase W PWM | PA10 (TIM1_CH3) | IN3 |
 | Driver enable | PC7 | EN |
+| Driver fault (optional) | PC8 | nFAULT (active-low) |
 | I2C1 SCL | PB6 | AS5600 SCL |
 | I2C1 SDA | PB7 | AS5600 SDA |
 
 Motor phases → Mini **M1 / M2 / M3**. Motor supply goes to the Mini (not USB alone). Share GND with the Nucleo.
 
+Wire Mini **nFAULT** to **PC8** if you want hardware fault shutdown. PC8 is pulled up; leave it disconnected if unused (`g_fault_en` can be set to `0`).
+
 ## What’s implemented
 
 - CubeMX / CMake project for STM32F446RE
 - TIM1 center-aligned 3-phase PWM (~25 kHz)
-- Driver EN GPIO
+- Driver EN GPIO + optional nFAULT on PC8
 - AS5600 I2C bus scan + raw 12-bit angle read
 - Open-loop rotating cosine voltage on U/V/W
-- Live Watch variables for enable, amplitude, and electrical speed
+- Encoder → electrical angle (`g_pole_pairs` + `g_zero_offset`)
+- Alignment calibration (lock d-axis, sample offset)
+- Sensor-aligned **voltage FOC** (dq → inverse Park/Clarke → PWM)
+- Outer **speed PI** and cascaded **position PI**
+- Flash-persisted calibration (pole pairs + zero offset)
+- Fixed-rate control in TIM1 update ISR (~2 kHz)
+- Live Watch variables for mode, enable, gains, and telemetry
 
-Application logic lives in `UserCode/Src/user_main.cpp` (`user_setup` / `user_loop` called from `main.c`).
+Application entry: `UserCode/Src/user_main.cpp` (thin glue). Modules: `as5600`, `motor_pwm`, `foc_math`, `control`, `user_params`, `user_flash`. Control runs in `HAL_TIM_PeriodElapsedCallback`; flash save from `user_loop`.
 
 ## Build & flash
 
@@ -44,7 +51,9 @@ Application logic lives in `UserCode/Src/user_main.cpp` (`user_setup` / `user_lo
 3. Flash over ST-Link.
 4. Power the Mini motor supply and connect the motor before enabling drive.
 
-## Bring-up (open-loop)
+Flash layout: code uses the first **384 KB**; **sector 7** (`0x08060000`) stores calibration.
+
+## Bring-up
 
 Watch these globals in the debugger Live Expressions / Watch window:
 
@@ -53,34 +62,94 @@ Watch these globals in the debugger Live Expressions / Watch window:
 | `g_enc_found` | `1` if AS5600 (`0x36`) answered the bus scan |
 | `g_enc_raw` | Raw angle `0..4095` |
 | `g_enc_status` | Last I2C read status |
-| `g_motor_en` | `0` = off (EN low); `1` = open-loop spin |
-| `g_amp` | Voltage amplitude (start ~`0.05`–`0.20`) |
-| `g_omega` | Electrical speed in rad/s |
+| `g_motor_en` | `0` = off (EN low); `1` = run selected mode |
+| `g_mode` | `0` open-loop · `1` torque · `2` speed · `3` position |
+| `g_amp` | Voltage amplitude / \|vq\| clamp (start ~`0.05`–`0.20`) |
+| `g_omega` | Open-loop elec. speed, or speed **reference** in mode 2 [rad/s elec.] |
+| `g_vd` / `g_vq` | dq voltages (mode 1; mode 2/3 override `vq`) |
+| `g_pole_pairs` | Motor pole pairs |
+| `g_zero_offset` | Mechanical angle [rad] at electrical 0 |
+| `g_align_req` | Set `1` to run alignment |
+| `g_align_busy` / `g_align_done` | Alignment status |
+| `g_align_amp` | DC lock voltage during align |
+| `g_save_req` / `g_save_ok` | Set `1` to store calib; `g_save_ok` after write |
+| `g_calib_loaded` | `1` if flash calib loaded at boot |
+| `g_kp_speed` / `g_ki_speed` | Speed PI gains |
+| `g_pos_ref` | Position setpoint [mech rad, multi-turn] |
+| `g_omega_max` | Max \|ω\| from position loop [elec rad/s] |
+| `g_kp_pos` / `g_ki_pos` | Position PI gains |
+| `g_fault_en` / `g_fault` / `g_fault_clr` | nFAULT monitor / latch / clear |
+| `g_theta_e` | Electrical angle [rad] |
+| `g_mech_angle` | Wrapped mechanical angle [rad] |
+| `g_mech_unwrapped` | Continuous mechanical angle [rad] |
+| `g_speed_e` | Measured electrical speed [rad/s] |
+| `g_omega_cmd` | Speed command after position PI |
+| `g_vq_out` | Commanded `vq` after PI / clamp |
 
-Typical flow:
+### 1) Encoder check
 
-1. Flash with motor/supply ready (or keep `g_motor_en = 0` until ready).
+1. Flash with `g_motor_en = 0` (default).
 2. Confirm `g_enc_found == 1` and `g_enc_raw` moves when you turn the shaft.
-3. Set `g_motor_en = 1` to spin.
-4. Raise `g_omega` in steps; bump `g_amp` slightly if it stalls.
+
+### 2) Open-loop (optional sanity check)
+
+1. `g_mode = 0`, set `g_amp` ~`0.08`, `g_omega` ~`30`.
+2. `g_motor_en = 1` → motor should spin.
 
 Mechanical RPM ≈ `(g_omega / 2π) × 60 / pole_pairs`.
+
+### 3) Align encoder (required once before FOC)
+
+1. Set `g_pole_pairs` to your motor.
+2. Shaft free; supply on.
+3. `g_align_req = 1` → lock ~1 s, then sample.
+4. Wait for `g_align_done == 1`.
+5. Optional: `g_save_req = 1` and confirm `g_save_ok == 1` so reboot keeps the offset.
+
+### 4) Voltage FOC (torque)
+
+1. `g_mode = 1`, `g_vd = 0`, small `g_vq`, then `g_motor_en = 1`.
+
+### 5) Speed mode
+
+1. `g_mode = 2`, set `g_omega` (electrical rad/s), tune `g_kp_speed` / `g_ki_speed`.
+2. `g_motor_en = 1`.
+
+### 6) Position mode
+
+1. Note `g_mech_unwrapped`, set `g_pos_ref` nearby (or `g_pos_ref = g_mech_unwrapped` first).
+2. `g_mode = 3`, modest `g_amp` / `g_omega_max`, then `g_motor_en = 1`.
+3. Step `g_pos_ref` by small amounts (e.g. ±0.5 rad) while tuning `g_kp_pos`.
+
+### Fault pin
+
+- With Mini **nFAULT → PC8**: a low level latches `g_fault = 1`, forces EN off, and clears `g_motor_en`.
+- Clear with `g_fault_clr = 1` once the pin is high again.
+- No wire? Leave disconnected (internal pull-up) or set `g_fault_en = 0`.
 
 ## Project layout
 
 ```
-Core/          CubeMX-generated HAL init (GPIO, I2C1, TIM1)
-UserCode/      Application code (encoder + open-loop drive)
-Drivers/       CMSIS + STM32F4 HAL
-BLDC_FOC.ioc   CubeMX configuration
+Core/              CubeMX-generated HAL init (GPIO, I2C1, TIM1)
+UserCode/Inc|Src/  Application modules:
+  user_main        setup / loop / TIM callback glue
+  user_params      Watch globals (g_*)
+  as5600           encoder I2C
+  motor_pwm        TIM1 duties + EN
+  foc_math         Park/Clarke helpers
+  control          modes, PI, align, fault, save
+  user_flash       calib sector R/W
+Drivers/           CMSIS + STM32F4 HAL
+BLDC_FOC.ioc       CubeMX configuration
 ```
 
 ## Future implementations
 
-- [ ] Encoder → electrical angle (pole pairs + zero-offset / alignment calibration)
-- [ ] Sensor-aligned **voltage FOC** (dq voltage → inverse Park → PWM; encoder closes the angle loop)
-- [ ] Outer **speed / position** loop (PI on RPM or shaft angle)
-- [ ] Move the control update off `HAL_Delay(2)` into a TIM ISR / fixed-rate interrupt
-- [ ] Safer defaults and fault handling (e.g. start with `g_motor_en = 0`, optional Mini `nFT` / fault pin)
-- [ ] **Current FOC** only if hardware is added (ADC + current sense); Mini v1 / DRV8313 is typically voltage-only and ADC is not enabled in Cube yet
-- [ ] Complementary PWM / dead-time if a different 6-PWM power stage is used later (not required for Mini)
+- [x] Encoder → electrical angle (pole pairs + zero-offset / alignment)
+- [x] Sensor-aligned **voltage FOC**
+- [x] Outer **speed** and **position** loops
+- [x] TIM ISR control (no `HAL_Delay` in the loop)
+- [x] Persist `g_zero_offset` / `g_pole_pairs` to flash
+- [x] Optional Mini `nFAULT` handling (PC8)
+- [ ] **Current FOC** only if hardware is added (ADC + current sense); Mini v1 / DRV8313 is typically voltage-only
+- [ ] Complementary PWM / dead-time for a 6-PWM stage (not required for Mini)

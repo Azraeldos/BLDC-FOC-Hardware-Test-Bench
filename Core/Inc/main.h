@@ -73,7 +73,9 @@ void Error_Handler(void);
 #define SWO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-
+/* Optional: wire SimpleFOC Mini nFAULT here (active-low). */
+#define NFT_Pin GPIO_PIN_8
+#define NFT_GPIO_Port GPIOC
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
