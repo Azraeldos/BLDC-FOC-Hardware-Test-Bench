@@ -155,7 +155,9 @@ Open the Nucleo’s virtual COM port. RX/TX are polled in `user_loop` so the con
 P,<profile_type>,<num_detents>,<kp>,<kd>,<min_deg>,<max_deg>,<center_deg>
 ```
 
-Example spring: `P,3,12,0.02,0.0002,-45,45,0`
+Example spring: `P,3,12,0.08,0.0005,-45,45,0`
+
+If the spring feels weak, raise `g_haptic_kp` and/or `g_amp` in the Watch window (no rebuild needed). If it oscillates, raise `g_haptic_kd` slightly.
 
 A valid `P` line updates haptic parameters and sets `g_mode = 4` atomically. It does **not** set `g_motor_en`.
 
