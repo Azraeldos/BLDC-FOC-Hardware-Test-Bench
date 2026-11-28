@@ -52,6 +52,7 @@ static void update_angle_speed(float mech)
     g_mech_unwrapped = mech;
     g_mech_prev_valid = true;
     g_speed_e = 0.f;
+    g_vel_deg_s = 0.f;
     return;
   }
 
@@ -62,6 +63,117 @@ static void update_angle_speed(float mech)
   const float omega_m = dmech / CTRL_DT;
   const float omega_e = omega_m * static_cast<float>(g_pole_pairs);
   g_speed_e = 0.90f * g_speed_e + 0.10f * omega_e;
+
+  // Heavier filter for haptic damping (deg/s) — avoids encoder count buzz.
+  const float omega_deg = omega_m * (180.0f / FOC_PI);
+  g_vel_deg_s = 0.95f * g_vel_deg_s + 0.05f * omega_deg;
+}
+
+/** Nearest detent index for telemetry (always computed from current detents). */
+static int16_t detent_index_from_angle(float angle_deg, uint8_t num_detents)
+{
+  if (num_detents == 0u) {
+    return 0;
+  }
+  const float sector = 360.0f / static_cast<float>(num_detents);
+  int idx = static_cast<int>((angle_deg / sector) + 0.5f);
+  if (idx >= static_cast<int>(num_detents)) {
+    idx = 0;
+  }
+  if (idx < 0) {
+    idx = 0;
+  }
+  return static_cast<int16_t>(idx);
+}
+
+/**
+ * Haptic voltage FOC: vd = 0, vq from profile PD laws.
+ * Positive vq increases mechanical angle (same sign convention as position mode).
+ */
+static float haptic_compute_vq(float angle_deg, float amp)
+{
+  const uint8_t type = g_haptic_type;
+  const float kp = g_haptic_kp;
+  const float kd = g_haptic_kd;
+  const float vel = g_vel_deg_s;
+  float vq = 0.f;
+
+  switch (type) {
+    case HAPTIC_DETENTS: {
+      uint8_t n = g_haptic_detents;
+      if (n < 1u) {
+        n = 1u;
+      }
+      const float sector = 360.0f / static_cast<float>(n);
+      const int16_t idx = detent_index_from_angle(angle_deg, n);
+      const float center = static_cast<float>(idx) * sector;
+      const float error = foc_wrap_pm_180(center - angle_deg);
+
+      float capture = g_haptic_capture_deg;
+      if (capture <= 0.f) {
+        capture = 0.5f * sector;  // auto: half sector full-width
+      }
+      // Clamp so the well cannot exceed one sector.
+      if (capture > sector) {
+        capture = sector;
+      }
+      const float half = 0.5f * capture;
+      const float abs_err = (error >= 0.f) ? error : -error;
+
+      if (abs_err <= half) {
+        vq = kp * error - kd * vel;
+      } else {
+        // Outside capture: glide with damping only.
+        vq = -kd * vel;
+      }
+      break;
+    }
+
+    case HAPTIC_RANGE: {
+      // Free interval [min, max] on the circle; walls restore with kp.
+      float min_d = g_haptic_min_deg;
+      float max_d = g_haptic_max_deg;
+      float span = foc_wrap_pm_180(max_d - min_d);
+      if (span <= 0.f) {
+        span += 360.f;
+      }
+      // Midpoint of the free window (may wrap).
+      const float mid = foc_wrap_0_360(min_d + 0.5f * span);
+      const float rel = foc_wrap_pm_180(angle_deg - mid);
+      const float half = 0.5f * span;
+
+      if (rel > half) {
+        // Past max wall: push back (negative error → negative vq).
+        const float error = half - rel;  // negative
+        vq = kp * error - kd * vel;
+      } else if (rel < -half) {
+        // Past min wall: push forward.
+        const float error = -half - rel;  // positive
+        vq = kp * error - kd * vel;
+      } else {
+        // Inside free range: optional damping only.
+        vq = -kd * vel;
+      }
+      break;
+    }
+
+    case HAPTIC_SPRING: {
+      const float error = foc_wrap_pm_180(g_haptic_center_deg - angle_deg);
+      vq = kp * error - kd * vel;
+      break;
+    }
+
+    case HAPTIC_DAMPER: {
+      vq = -kd * vel;
+      break;
+    }
+
+    default:
+      vq = 0.f;
+      break;
+  }
+
+  return foc_clamp(vq, -amp, amp);
 }
 
 static float speed_pi(float omega_ref, float amp)
@@ -195,6 +307,10 @@ void control_tick(void)
   g_theta_e    = as5600_mech_to_elec(mech, g_zero_offset, g_pole_pairs);
   update_angle_speed(mech);
 
+  // Telemetry for serial / Live Watch (safe to update every tick).
+  g_angle_deg = as5600_mech_to_deg(mech);
+  g_detent_index = detent_index_from_angle(g_angle_deg, g_haptic_detents);
+
   if (g_align_req && g_align_phase == ALIGN_IDLE) {
     align_start();
   }
@@ -252,6 +368,21 @@ void control_tick(void)
       const float vd = foc_clamp(g_vd, -amp, amp);
       g_vq_out = vq;
       motor_pwm_set_dq(vd, vq, g_theta_e);
+      break;
+    }
+
+    case MODE_HAPTIC: {
+      // Encoder required for haptic feedback; fail safe if missing.
+      if (!g_enc_found) {
+        motor_pwm_stop();
+        g_vq_out = 0.f;
+        g_omega_cmd = 0.f;
+        break;
+      }
+      const float vq = haptic_compute_vq(g_angle_deg, amp);
+      g_vq_out = vq;
+      g_omega_cmd = 0.f;
+      motor_pwm_set_dq(0.f, vq, g_theta_e);
       break;
     }
 

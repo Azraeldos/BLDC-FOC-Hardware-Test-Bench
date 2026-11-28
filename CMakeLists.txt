@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     UserCode/Src/user_main.cpp
     UserCode/Src/user_params.cpp
     UserCode/Src/user_flash.cpp
+    UserCode/Src/user_comm.cpp
     UserCode/Src/as5600.cpp
     UserCode/Src/foc_math.cpp
     UserCode/Src/motor_pwm.cpp

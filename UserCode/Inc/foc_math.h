@@ -31,6 +31,22 @@ inline float foc_clamp01(float x)
   return foc_clamp(x, 0.f, 1.f);
 }
 
+/** Wrap degrees into [0, 360). */
+inline float foc_wrap_0_360(float deg)
+{
+  while (deg >= 360.f) deg -= 360.f;
+  while (deg < 0.f)    deg += 360.f;
+  return deg;
+}
+
+/** Shortest signed angular error in degrees, into (-180, 180]. */
+inline float foc_wrap_pm_180(float deg)
+{
+  while (deg >  180.f) deg -= 360.f;
+  while (deg <= -180.f) deg += 360.f;
+  return deg;
+}
+
 /** Inverse Park + Clarke → phase voltages in ~[-1, 1]. */
 void foc_dq_to_abc(float vd, float vq, float theta_e,
                    float *va, float *vb, float *vc);

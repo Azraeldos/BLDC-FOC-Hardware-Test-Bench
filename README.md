@@ -22,6 +22,8 @@ STM32 firmware for BLDC motor bring-up and sensor-aligned **voltage FOC** on a *
 | Driver fault (optional) | PC8 | nFAULT (active-low) |
 | I2C1 SCL | PB6 | AS5600 SCL |
 | I2C1 SDA | PB7 | AS5600 SDA |
+| USART2 TX (VCP) | PA2 | ST-Link virtual COM |
+| USART2 RX (VCP) | PA3 | ST-Link virtual COM |
 
 Motor phases → Mini **M1 / M2 / M3**. Motor supply goes to the Mini (not USB alone). Share GND with the Nucleo.
 
@@ -38,11 +40,13 @@ Wire Mini **nFAULT** to **PC8** if you want hardware fault shutdown. PC8 is pull
 - Alignment calibration (lock d-axis, sample offset)
 - Sensor-aligned **voltage FOC** (dq → inverse Park/Clarke → PWM)
 - Outer **speed PI** and cascaded **position PI**
+- **Haptic force-feedback** (mode 4): detents, bounded range, return-to-center, viscous damper
+- Non-blocking **USART2 VCP** @ 115200: profile commands in, ~60 Hz telemetry out
 - Flash-persisted calibration (pole pairs + zero offset)
 - Fixed-rate control in TIM1 update ISR (~2 kHz)
 - Live Watch variables for mode, enable, gains, and telemetry
 
-Application entry: `UserCode/Src/user_main.cpp` (thin glue). Modules: `as5600`, `motor_pwm`, `foc_math`, `control`, `user_params`, `user_flash`. Control runs in `HAL_TIM_PeriodElapsedCallback`; flash save from `user_loop`.
+Application entry: `UserCode/Src/user_main.cpp` (thin glue). Modules: `as5600`, `motor_pwm`, `foc_math`, `control`, `user_params`, `user_flash`, `user_comm`. Control runs in `HAL_TIM_PeriodElapsedCallback`; serial + flash save from `user_loop`.
 
 ## Build & flash
 
@@ -63,7 +67,7 @@ Watch these globals in the debugger Live Expressions / Watch window:
 | `g_enc_raw` | Raw angle `0..4095` |
 | `g_enc_status` | Last I2C read status |
 | `g_motor_en` | `0` = off (EN low); `1` = run selected mode |
-| `g_mode` | `0` open-loop · `1` torque · `2` speed · `3` position |
+| `g_mode` | `0` open-loop · `1` torque · `2` speed · `3` position · `4` haptic |
 | `g_amp` | Voltage amplitude / \|vq\| clamp (start ~`0.05`–`0.20`) |
 | `g_omega` | Open-loop elec. speed, or speed **reference** in mode 2 [rad/s elec.] |
 | `g_vd` / `g_vq` | dq voltages (mode 1; mode 2/3 override `vq`) |
@@ -85,6 +89,11 @@ Watch these globals in the debugger Live Expressions / Watch window:
 | `g_speed_e` | Measured electrical speed [rad/s] |
 | `g_omega_cmd` | Speed command after position PI |
 | `g_vq_out` | Commanded `vq` after PI / clamp |
+| `g_haptic_type` | `1` detents · `2` range · `3` spring · `4` damper |
+| `g_haptic_detents` / `g_haptic_kp` / `g_haptic_kd` | Profile gains |
+| `g_haptic_min_deg` / `g_haptic_max_deg` / `g_haptic_center_deg` | Range / spring angles [deg] |
+| `g_haptic_capture_deg` | Detent capture width (`<=0` = auto half-sector) |
+| `g_angle_deg` / `g_detent_index` / `g_vel_deg_s` | Haptic telemetry |
 
 ### 1) Encoder check
 
@@ -121,6 +130,41 @@ Mechanical RPM ≈ `(g_omega / 2π) × 60 / pole_pairs`.
 2. `g_mode = 3`, modest `g_amp` / `g_omega_max`, then `g_motor_en = 1`.
 3. Step `g_pos_ref` by small amounts (e.g. ±0.5 rad) while tuning `g_kp_pos`.
 
+### 7) Haptic mode (force feedback)
+
+Requires prior alignment (same as modes 1–3). Haptic laws run in the ~2 kHz TIM1 tick with `vd = 0` and `|vq| ≤ g_amp`.
+
+1. Align and set a modest `g_amp` (~`0.08`–`0.20`).
+2. Either set `g_mode = 4` and tune `g_haptic_*` in the Watch window, **or** send a profile line over the ST-Link VCP (below).
+3. `g_motor_en = 1` — enable is never set by serial; you must arm it yourself.
+
+| `g_haptic_type` | Feel |
+|-----------------|------|
+| `1` | Discrete detents around the circle |
+| `2` | Free twist in `[min, max]` with hard end-stops |
+| `3` | Return-to-center spring |
+| `4` | Viscous damper only (`kp` ignored) |
+
+### Serial (ST-Link VCP @ 115200 8N1)
+
+Open the Nucleo’s virtual COM port. RX/TX are polled in `user_loop` so the control ISR is never blocked by string I/O.
+
+**Host → MCU** (newline-terminated; invalid lines are ignored):
+
+```
+P,<profile_type>,<num_detents>,<kp>,<kd>,<min_deg>,<max_deg>,<center_deg>
+```
+
+Example spring: `P,3,12,0.02,0.0002,-45,45,0`
+
+A valid `P` line updates haptic parameters and sets `g_mode = 4` atomically. It does **not** set `g_motor_en`.
+
+**MCU → host** (~60 Hz):
+
+```
+A,<angle_deg>,<detent_index>,<vel_deg_s>,<fault_flag>
+```
+
 ### Fault pin
 
 - With Mini **nFAULT → PC8**: a low level latches `g_fault = 1`, forces EN off, and clears `g_motor_en`.
@@ -137,8 +181,9 @@ UserCode/Inc|Src/  Application modules:
   as5600           encoder I2C
   motor_pwm        TIM1 duties + EN
   foc_math         Park/Clarke helpers
-  control          modes, PI, align, fault, save
+  control          modes, PI, haptic, align, fault, save
   user_flash       calib sector R/W
+  user_comm        USART2 VCP profile RX + telemetry TX
 Drivers/           CMSIS + STM32F4 HAL
 BLDC_FOC.ioc       CubeMX configuration
 ```
@@ -151,5 +196,6 @@ BLDC_FOC.ioc       CubeMX configuration
 - [x] TIM ISR control (no `HAL_Delay` in the loop)
 - [x] Persist `g_zero_offset` / `g_pole_pairs` to flash
 - [x] Optional Mini `nFAULT` handling (PC8)
+- [x] Haptic profiles + non-blocking VCP serial
 - [ ] **Current FOC** only if hardware is added (ADC + current sense); SimpleFOCMiniv1 / DRV8313 is typically voltage-only
 - [ ] Complementary PWM / dead-time for a 6-PWM stage (not required for SimpleFOCMiniv1)

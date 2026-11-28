@@ -16,7 +16,7 @@
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/build/Debug/BLDC_FOV.elf"
+                    "imageFileName": "${workspaceFolder}/build/Debug/BLDC_FOC.elf"
                 }
             ]
         },

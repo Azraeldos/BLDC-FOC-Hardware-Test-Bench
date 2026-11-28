@@ -42,6 +42,11 @@ float as5600_raw_to_mech(uint16_t raw)
   return (static_cast<float>(raw) / 4096.0f) * FOC_TWO_PI;
 }
 
+float as5600_mech_to_deg(float mech)
+{
+  return foc_wrap_0_360(mech * (180.0f / FOC_PI));
+}
+
 float as5600_mech_to_elec(float mech, float zero_offset, uint8_t pole_pairs)
 {
   return foc_wrap_0_2pi((mech - zero_offset) * static_cast<float>(pole_pairs));
